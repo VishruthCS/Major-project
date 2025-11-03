@@ -3,6 +3,8 @@ from features import FeatureExtractor, draw_styled_landmarks
 import cv2, os, numpy as np, time
 import mediapipe as mp
 
+mp_holistic = mp.solutions.holistic
+mp_drawing = mp.solutions.drawing_utils
 
 def run_data_collection():
     """Main function to run the enhanced data collection UI."""

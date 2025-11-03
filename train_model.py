@@ -1,29 +1,40 @@
+#
+# Step 2: Model Training (FINAL STABLE VERSION)
+#
+# This script trains a fast and accurate scikit-learn model.
+# It does NOT use TensorFlow, guaranteeing no camera conflicts.
+#
+
+import os
+import numpy as np
+import pickle
+import logging
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score, classification_report
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn.preprocessing import StandardScaler
+
+# Import from our shared files
 from config import Config
-import os, numpy as np, pickle, logging
 
-def run_model_training():
-    """Loads the collected enhanced data, trains the advanced model, and saves the best version."""
-    from tensorflow.keras.models import Sequential
-    from tensorflow.keras.layers import LSTM, Dense, Dropout
-    from tensorflow.keras.utils import to_categorical
-    from tensorflow.keras.callbacks import EarlyStopping
-    from sklearn.model_selection import train_test_split
-    from sklearn.metrics import accuracy_score, classification_report
-
-    logging.info("--- Starting Enhanced Model Training ---")
+def main():
+    """Loads collected data, flattens it, and trains a KNN model."""
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
+    
+    logging.info("--- Starting Stable Model Training ---")
     
     if not os.path.exists(Config.DATA_PATH):
-        logging.error(f"Data path '{Config.DATA_PATH}' not found. Please run 'collect' first.")
+        logging.error(f"Data path '{Config.DATA_PATH}' not found. Please run 'python main.py collect' first.")
         return
         
     gestures = sorted([d for d in os.listdir(Config.DATA_PATH) if os.path.isdir(os.path.join(Config.DATA_PATH, d))])
     
     if len(gestures) < 2:
-        logging.warning("Please collect at least 2 different gestures before training.")
+        logging.warning("Please collect data for at least 2 different gestures before training.")
         return
 
     label_map = {label: idx for idx, label in enumerate(gestures)}
-    sequences, labels = [], []
+    features, labels = [], []
 
     logging.info("Loading collected enhanced gesture data...")
     for gesture, label in label_map.items():
@@ -33,55 +44,53 @@ def run_model_training():
             logging.warning(f"Gesture '{gesture}' needs {Config.MIN_SAMPLES_PER_GESTURE} samples. Aborting.")
             return
         for fname in sample_files:
-            sequences.append(np.load(os.path.join(gpath, fname)))
+            # We load the sequence, but flatten it for the static classifier
+            sequence = np.load(os.path.join(gpath, fname))
+            # We flatten the 30-frame sequence into a single feature vector
+            features.append(sequence.flatten()) 
             labels.append(label)
 
-    X = np.array(sequences, dtype=np.float32)
-    labels_arr = np.array(labels)
-    y = to_categorical(labels_arr).astype(int)
+    X = np.array(features, dtype=np.float32)
+    y = np.array(labels)
     
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=labels_arr)
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
     
     logging.info(f"📊 Training on {len(X_train)} samples for {len(label_map)} gestures...")
     
-    model = Sequential([
-        LSTM(64, return_sequences=True, activation='relu', input_shape=(Config.SEQUENCE_LENGTH, X.shape[2])),
-        LSTM(128, return_sequences=True, activation='relu'),
-        Dropout(0.2),
-        LSTM(64, return_sequences=False, activation='relu'),
-        Dense(64, activation='relu'),
-        Dropout(0.2),
-        Dense(32, activation='relu'),
-        Dense(len(label_map), activation='softmax')
-    ])
+    # Scale the data (very important for KNN)
+    scaler = StandardScaler()
+    X_train = scaler.fit_transform(X_train)
+    X_test = scaler.transform(X_test)
     
-    model.compile(optimizer='Adam', loss='categorical_crossentropy', metrics=['categorical_accuracy'])
-    model.summary()
+    model = KNeighborsClassifier(n_neighbors=min(5, len(X_train)))
     
-    early_stopping_callback = EarlyStopping(
-        monitor='val_categorical_accuracy', patience=10, verbose=1, mode='max', restore_best_weights=True
-    )
-    
-    history = model.fit(
-        X_train, y_train, epochs=Config.TRAIN_EPOCHS, validation_data=(X_test, y_test), 
-        batch_size=16, verbose=1, callbacks=[early_stopping_callback]
-    )
+    model.fit(X_train, y_train)
 
-    model.save(Config.MODEL_PATH)
-    with open(Config.LABELS_PATH, "wb") as f: pickle.dump(label_map, f)
+    # Save the model, the label map, AND the scaler
+    model_data = {
+        'model': model,
+        'label_map': {idx: label for label, idx in label_map.items()}, # Save in {index: name} format
+        'scaler': scaler
+    }
+    
+    with open(Config.MODEL_PATH, "wb") as f:
+        pickle.dump(model_data, f)
+    
+    # Save the label map separately (good practice)
+    with open(Config.LABELS_PATH, "wb") as f:
+        pickle.dump(label_map, f)
 
     logging.info("\n--- TRAINING COMPLETE ---")
     
-    y_pred_probs = model.predict(X_test)
-    y_pred = np.argmax(y_pred_probs, axis=1)
-    y_true = np.argmax(y_test, axis=1)
-    
-    final_accuracy = accuracy_score(y_true, y_pred)
+    y_pred = model.predict(X_test)
+    final_accuracy = accuracy_score(y_test, y_pred)
     logging.info(f"Final Best Validation Accuracy: {final_accuracy * 100:.2f}%")
     
     print("\nClassification Report (from best model):")
-    target_names = ["" for _ in range(len(label_map))]
-    for name, index in label_map.items(): target_names[index] = name
-    print(classification_report(y_true, y_pred, target_names=target_names, zero_division=0))
+    print(classification_report(y_test, y_pred, target_names=gestures, zero_division=0))
     
     logging.info(f"Model saved to '{Config.MODEL_PATH}'")
+
+if __name__ == "__main__":
+    main()
+

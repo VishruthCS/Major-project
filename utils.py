@@ -1,5 +1,5 @@
 #
-# features.py (Final Professional Version)
+# Utility Functions (Final Professional Version)
 #
 # This file contains helper functions, including our new, brilliant
 # enhanced feature extraction logic.
@@ -67,3 +67,4 @@ def draw_styled_landmarks(image, results):
         mp_drawing.draw_landmarks(image, results.right_hand_landmarks, mp_holistic.HAND_CONNECTIONS, 
                                  mp_drawing.DrawingSpec(color=(245,117,66), thickness=2, circle_radius=4), 
                                  mp_drawing.DrawingSpec(color=(245,66,230), thickness=2, circle_radius=2))
+
