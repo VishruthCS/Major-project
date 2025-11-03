@@ -12,7 +12,7 @@ load_dotenv()
 
 class Config:
     # --- IMPORTANT: API key is loaded from your .env file ---
-    GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "YOUR_GEMINI_API_KEY_HERE")
+    GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "AIzaSyCW1l8Cft3nAVGsrqykySSaOGTwWdEzC_Y")
     
     # --- Project File Paths ---
     # We use a new data path to store our new, enhanced features

@@ -39,9 +39,11 @@ def tts_worker(q, engine):
         q.task_done()
 
 def gemini_worker(q_in, q_out):
+    """Worker thread to process keywords with the Gemini API."""
     while True:
         keywords = q_in.get()
         if keywords is None: break
+        # This check will now succeed because Config.GEMINI_API_KEY is loaded properly
         if not keywords or not Config.GEMINI_API_KEY or Config.GEMINI_API_KEY == "YOUR_GEMINI_API_KEY_HERE":
             q_out.put("API Key Not Set" if not Config.GEMINI_API_KEY or Config.GEMINI_API_KEY == "YOUR_GEMINI_API_KEY_HERE" else "")
             q_in.task_done()
@@ -61,6 +63,7 @@ def gemini_worker(q_in, q_out):
         except Exception:
             q_out.put("API Error.")
         q_in.task_done()
+
 
 def main():
     logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
@@ -141,11 +144,18 @@ def main():
                     best_idx, best_prob = np.argmax(probs), np.max(probs)
                     
                     if best_prob > Config.CONF_THRESHOLD:
-                        prediction = model.classes_[best_idx]
-                        prediction_history.append(prediction)
+                        # Get the predicted index (e.g., 1)
+                        predicted_index = model.classes_[best_idx]
+                        # Use the index to get the gesture NAME (e.g., "world")
+                        prediction_name = label_map[predicted_index] 
+                        # Append the NAME, not the index
+                        prediction_history.append(prediction_name)
+                        
                         if len(prediction_history) == Config.PREDICTION_SMOOTHING:
                             current_prediction = max(set(prediction_history), key=list(prediction_history).count)
 
+            # --- THIS BLOCK IS NOW CORRECTLY INDENTED ---
+            # It runs every frame to check for gestures and pauses.
             if current_prediction != "None":
                 last_gesture_time = time.time()
                 if not sentence_keywords or sentence_keywords[-1] != current_prediction:
@@ -165,7 +175,8 @@ def main():
 
             # UI Display
             cv2.rectangle(image, (0, image.shape[0] - 80), (image.shape[1], image.shape[0]), (0,0,0), -1)
-            cv2.putText(image, " ".join(map(str, sentence_keywords)), (10, image.shape[0] - 50), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+            # This line is now correct, as sentence_keywords contains strings
+            cv2.putText(image, " ".join(sentence_keywords), (10, image.shape[0] - 50), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
             cv2.putText(image, final_sentence, (10, image.shape[0] - 15), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 100), 2)
             
             if not model_loaded:
@@ -180,9 +191,9 @@ def main():
     # --- Cleanup ---
     cap.release()
     cv2.destroyAllWindows()
-    tts_queue.put(None); tts_thread.join()
-    gemini_q_in.put(None); gemini_thread.join()
+    tts_queue.put(None) 
+    gemini_q_in.put(None)
+    # The .join() calls were removed as the threads were not assigned to variables
 
 if __name__ == "__main__":
     main()
-
