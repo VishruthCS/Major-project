@@ -12,7 +12,7 @@ load_dotenv()
 
 class Config:
     # --- IMPORTANT: API key is loaded from your .env file ---
-    GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "AIzaSyCW1l8Cft3nAVGsrqykySSaOGTwWdEzC_Y")
+    GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "YOUR_GEMINI_API_KEY_HERE")
     
     # --- Project File Paths ---
     # We use a new data path to store our new, enhanced features
@@ -26,8 +26,8 @@ class Config:
     MIN_SAMPLES_PER_GESTURE = 15 # 15-20 is ideal
     
     # --- Recognition Parameters ---
-    CONF_THRESHOLD = 0.75 
-    MOVEMENT_THRESHOLD = 0.02 
+    CONF_THRESHOLD = 0.4 
+    MOVEMENT_THRESHOLD = 0.03
     PREDICTION_SMOOTHING = 5
     
     # --- Hybrid AI Parameters ---
