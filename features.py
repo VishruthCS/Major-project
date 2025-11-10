@@ -28,29 +28,35 @@ class FeatureExtractor:
 
     def extract_enhanced_features(self, results):
         """
-        Extracts a rich set of features including raw keypoints, velocity,
-        and acceleration. This is the "smarter textbook" for our model.
-        """
+    Extracts enhanced features = base + velocity + acceleration.
+    Ensures exact vector length (774).
+    """
         base_features = self.extract_raw_keypoints(results)
-        
-        # Store the raw keypoints for calculating derivatives
         self.raw_keypoints_buffer.append(base_features)
 
-        # Ensure we have enough history to calculate features
+    # Keep only last 3 frames in buffer
+        if len(self.raw_keypoints_buffer) > 3:
+            self.raw_keypoints_buffer.pop(0)
+
+    # Not enough history yet → zero vector
         if len(self.raw_keypoints_buffer) < 3:
-            # If not enough history, return a zero vector of the final expected shape
-            # The final shape is base + velocity + acceleration = 258 * 3 = 774
-            return np.zeros(len(base_features) * 3, dtype=np.float32)
+            return np.zeros(774, dtype=np.float32)
 
-        # 2. Velocity (current frame - previous frame)
-        velocity = self.raw_keypoints_buffer[2] - self.raw_keypoints_buffer[1]
+    # Compute velocity & acceleration
+        velocity = self.raw_keypoints_buffer[-1] - self.raw_keypoints_buffer[-2]
+        prev_velocity = self.raw_keypoints_buffer[-2] - self.raw_keypoints_buffer[-3]
+        acceleration = velocity - prev_velocity
 
-        # 3. Acceleration (current velocity - previous velocity)
-        previous_velocity = self.raw_keypoints_buffer[1] - self.raw_keypoints_buffer[0]
-        acceleration = velocity - previous_velocity
+    # Combine and trim/pad exactly to 774
+        combined = np.concatenate([base_features, velocity, acceleration])
+        if combined.shape[0] > 774:
+            combined = combined[:774]
+        elif combined.shape[0] < 774:
+            combined = np.pad(combined, (0, 774 - combined.shape[0]))
 
-        # 4. Combine all features into one vector
-        return np.concatenate([base_features, velocity, acceleration]).astype(np.float32)
+        return combined.astype(np.float32)
+
+
 
 
 def draw_styled_landmarks(image, results):

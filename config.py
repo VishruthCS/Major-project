@@ -16,19 +16,20 @@ class Config:
     
     # --- Project File Paths ---
     # We use a new data path to store our new, enhanced features
-    DATA_PATH = "enhanced_gesture_data"
+    DATA_PATH = "gesture_data"
     # --- NEW MODEL PATHS ---
-    MODEL_PATH = "gesture_knn_model.pkl" # We are using a KNN model
+    MODEL_PATH = "gesture_lstm_model.h5" # We are using a KNN model
     LABELS_PATH = "enhanced_labels.pkl"
+    FEATURE_LENGTH = 777
 
     # --- Model & Data Parameters ---
     SEQUENCE_LENGTH = 30
     MIN_SAMPLES_PER_GESTURE = 15 # 15-20 is ideal
     
     # --- Recognition Parameters ---
-    CONF_THRESHOLD = 0.4 
-    MOVEMENT_THRESHOLD = 0.03
-    PREDICTION_SMOOTHING = 5
+    CONF_THRESHOLD = 0.75
+    MOVEMENT_THRESHOLD = 0.02
+    PREDICTION_SMOOTHING = 7
     
     # --- Hybrid AI Parameters ---
     PAUSE_THRESHOLD = 2.5 
