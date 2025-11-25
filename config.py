@@ -18,12 +18,14 @@ class Config:
     # We use a new data path to store our new, enhanced features
     DATA_PATH = "gesture_data"
     # --- NEW MODEL PATHS ---
-    MODEL_PATH = "gesture_lstm_model.h5" # We are using a KNN model
+    MODEL_PATH = "gesture_lstm_model.keras" # We are using a KNN model
     LABELS_PATH = "enhanced_labels.pkl"
-    FEATURE_LENGTH = 777
+    SCALER_PATH = "scaler_lstm.pkl"
+
+    feature_dim = 774
 
     # --- Model & Data Parameters ---
-    SEQUENCE_LENGTH = 30
+    SEQUENCE_LENGTH = 40
     MIN_SAMPLES_PER_GESTURE = 15 # 15-20 is ideal
     
     # --- Recognition Parameters ---

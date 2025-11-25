@@ -1,136 +1,191 @@
-#
-# train_lstm_model.py — Enhanced LSTM (Model 3, Final Polished)
-#
-# ✅ Sequence-aware deep LSTM
-# ✅ Uses velocity + acceleration features (smart textbook)
-# ✅ Dropout regularization & ReLU dense layer
-# ✅ Per-feature normalization (prevents class collapse)
-# ✅ Exports .h5 model for real-time recognition
-#
-
-import os
-import numpy as np
-import logging
-import pickle
-from sklearn.model_selection import train_test_split
+# train_model.py
+import os, json, logging, pickle, random, numpy as np
 from sklearn.preprocessing import StandardScaler
-from sklearn.metrics import classification_report, accuracy_score
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import LSTM, Dense, Dropout
-from tensorflow.keras.utils import to_categorical
-from tensorflow.keras.callbacks import EarlyStopping
 from sklearn.model_selection import GroupShuffleSplit
+from sklearn.utils.class_weight import compute_class_weight
+from sklearn.metrics import classification_report, accuracy_score
+import tensorflow as tf
+from tensorflow.keras.models import Model
+from tensorflow.keras.layers import Input, LSTM, Dense, Dropout, Multiply, Softmax, GlobalAveragePooling1D
+from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau, ModelCheckpoint
+from tensorflow.keras.utils import to_categorical
 from config import Config
+from features import FeatureExtractor
 
-# --- Logging ---
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
-# --- Early stopping ---
-callbacks = [EarlyStopping(monitor='val_loss', patience=6, restore_best_weights=True)]
+def stable_attention_block(inputs):
+    # inputs: (batch, time, features)
+    # produce attention weights per timestep -> shape (batch, time, 1)
+    att = Dense(1, activation='tanh')(inputs)          # (batch, time, 1)
+    att = Softmax(axis=1)(att)                         # normalize across time
+    # multiply will broadcast the (batch,time,1) across features
+    context = Multiply()([inputs, att])                # (batch, time, features)
+    pooled = GlobalAveragePooling1D()(context)         # (batch, features)
+    return pooled
 
+def augment_sequence(seq):
+    # Simple augmentations: jitter, time crop/pad
+    seq = seq.copy()
+    # jitter: small gaussian noise
+    noise = np.random.normal(0, 1e-3, seq.shape)
+    seq = seq + noise
+    # time warp: random repeat or drop frames (keeps final length later)
+    if random.random() < 0.3:
+        # stretch or compress by random factor between 0.9 and 1.1
+        factor = random.uniform(0.92, 1.08)
+        indices = np.clip((np.arange(seq.shape[0]) * factor).astype(int), 0, seq.shape[0]-1)
+        seq = seq[indices]
+    return seq
+
+def load_data():
+    gestures = sorted([d for d in os.listdir(Config.DATA_PATH)
+                       if os.path.isdir(os.path.join(Config.DATA_PATH, d)) and not d.startswith("_")])
+    label_map = {g:i for i,g in enumerate(gestures)}
+    features, labels, groups = [], [], []
+    logging.info("📂 Loading gesture sequences...")
+    for g,idx in label_map.items():
+        gdir = os.path.join(Config.DATA_PATH, g)
+        for fn in os.listdir(gdir):
+            if not fn.endswith(".npy"): continue
+            seq = np.load(os.path.join(gdir, fn)).astype(np.float32)
+            if seq.ndim != 2 or seq.shape[1] != 774:
+                logging.warning(f"⚠️ Skipping {g}/{fn} shape={seq.shape}")
+                continue
+            # pad/trim to SEQUENCE_LENGTH
+            if seq.shape[0] < Config.SEQUENCE_LENGTH:
+                pad = np.tile(seq[-1:], (Config.SEQUENCE_LENGTH - seq.shape[0], 1))
+                seq = np.concatenate([seq, pad], axis=0)
+            elif seq.shape[0] > Config.SEQUENCE_LENGTH:
+                seq = seq[:Config.SEQUENCE_LENGTH]
+            features.append(seq)
+            labels.append(idx)
+            groups.append(f"{g}_{fn}")
+    X = np.array(features, dtype=np.float32)
+    y = np.array(labels, dtype=np.int32)
+    logging.info(f"✅ Loaded {len(X)} sequences across {len(label_map)} gestures")
+    return X, y, label_map, groups
+
+def preprocess_and_scale(X, scaler=None, fit_scaler=False):
+    # per-feature z-score across all time & samples (as in earlier design)
+    X = (X - np.mean(X, axis=(0,1), keepdims=True)) / (np.std(X, axis=(0,1), keepdims=True) + 1e-6)
+    ns, tfm, feat = X.shape
+    X_reshaped = X.reshape(ns * tfm, feat)
+    if fit_scaler:
+        scaler = StandardScaler()
+        X_scaled = scaler.fit_transform(X_reshaped)
+    else:
+        X_scaled = scaler.transform(X_reshaped)
+    X = X_scaled.reshape(ns, tfm, feat)
+    return X, scaler
+
+def build_model(seq_len, feat_dim, num_classes):
+    inp = Input(shape=(seq_len, feat_dim), name="input_layer")
+    x = LSTM(128, return_sequences=True, dropout=0.35, recurrent_dropout=0.15)(inp)
+    x = LSTM(64, return_sequences=True, dropout=0.35, recurrent_dropout=0.15)(x)
+    x = stable_attention_block(x)   # yields (batch, features)
+    x = Dense(64, activation='relu')(x)
+    x = Dropout(0.5)(x)
+    out = Dense(num_classes, activation='softmax')(x)
+    model = Model(inputs=inp, outputs=out)
+    model.compile(optimizer='adam',
+                  loss=tf.keras.losses.CategoricalCrossentropy(label_smoothing=0.05),
+                  metrics=['accuracy'])
+    return model
 
 def main():
-    logging.info("--- Starting Enhanced LSTM Training ---")
-
+    logging.info("--- 🚀 Starting Hybrid LSTM + Attention Training ---")
     if not os.path.exists(Config.DATA_PATH):
-        logging.error(f"❌ Data path '{Config.DATA_PATH}' not found.")
+        logging.error("❌ Data path missing.")
         return
-
-    # --- Load all gesture sequences ---
-    gestures = sorted([d for d in os.listdir(Config.DATA_PATH) if os.path.isdir(os.path.join(Config.DATA_PATH, d))])
-    label_map = {gesture: idx for idx, gesture in enumerate(gestures)}
-    features, labels = [], []
-
-    logging.info("📂 Loading gesture sequences...")
-    for gesture, idx in label_map.items():
-        gesture_dir = os.path.join(Config.DATA_PATH, gesture)
-        for file in os.listdir(gesture_dir):
-            if file.endswith(".npy"):
-                seq = np.load(os.path.join(gesture_dir, file))
-                # ensure correct shape
-                if seq.shape == (Config.SEQUENCE_LENGTH, 774):
-                    features.append(seq)
-                    labels.append(idx)
-
-    X = np.array(features, dtype=np.float32)
-    y = np.array(labels)
-    logging.info(f"✅ Loaded {len(X)} sequences across {len(label_map)} gestures")
-
+    X, y, label_map, groups = load_data()
     if len(X) == 0:
-        logging.error("❌ No valid .npy files found. Check your dataset.")
+        logging.error("❌ No valid samples.")
         return
 
-    # --- Normalize features (critical for stability) ---
-    # Per-feature z-score normalization across all samples
-    X = (X - np.mean(X, axis=(0, 1), keepdims=True)) / (np.std(X, axis=(0, 1), keepdims=True) + 1e-6)
+    # augmentation (on-the-fly) will be applied below by duplicating small fraction
+    ns = len(X)
 
-    # --- Flatten across time for scaling (extra normalization) ---
-    nsamples, nframes, nfeatures = X.shape
-    X_reshaped = X.reshape(nsamples * nframes, nfeatures)
-    scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(X_reshaped)
-    X = X_scaled.reshape(nsamples, nframes, nfeatures)
+    # Preprocess & scale
+    X, scaler = preprocess_and_scale(X, scaler=None, fit_scaler=True)
 
-    # --- Train-test split ---
-    groups = []
-    for gesture, idx in label_map.items():
-        gesture_dir = os.path.join(Config.DATA_PATH, gesture)
-        for file in os.listdir(gesture_dir):
-            if file.endswith(".npy"):
-                base_name = file.replace("dup_", "").split(".")[0]
-                groups.append(f"{gesture}_{base_name}")
-
-# Ensure groups and features align
-    assert len(groups) == len(X), "Group count mismatch — check data loading logic."
-
-# --- Split ensuring same group never in both sets ---
+    # group-wise split to prevent same file duplicates in both sets
     gss = GroupShuffleSplit(n_splits=1, test_size=0.2, random_state=42)
     train_idx, test_idx = next(gss.split(X, y, groups))
-
     X_train, X_test = X[train_idx], X[test_idx]
     y_train, y_test = y[train_idx], y[test_idx]
+
     num_classes = len(label_map)
     y_train_cat = to_categorical(y_train, num_classes)
     y_test_cat = to_categorical(y_test, num_classes)
 
-    # --- Build Enhanced LSTM Model ---
-    model = Sequential([
-        LSTM(128, return_sequences=True, input_shape=(Config.SEQUENCE_LENGTH, nfeatures), dropout=0.4, recurrent_dropout=0.2),
-        LSTM(64, return_sequences=False, dropout=0.4, recurrent_dropout=0.2),
-        Dense(64, activation='relu'),
-        Dropout(0.6),  # slightly increased dropout for better generalization
-        Dense(num_classes, activation='softmax')
-    ])
+    # class weights
+    cw = compute_class_weight('balanced', classes=np.unique(y_train), y=y_train)
+    class_weight = {i: float(w) for i,w in enumerate(cw)}
+    logging.info(f"Class weights: {class_weight}")
 
-    model.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['accuracy'])
+    model = build_model(Config.SEQUENCE_LENGTH, X.shape[2], num_classes)
     model.summary(print_fn=logging.info)
 
-    # --- Train ---
+    # callbacks
+    callbacks = [
+        EarlyStopping(monitor='val_loss', patience=8, restore_best_weights=True),
+        ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=4, min_lr=1e-6, verbose=1),
+        ModelCheckpoint("gesture_lstm_model.keras", save_best_only=True, monitor='val_loss')
+    ]
+
+    # small on-the-fly augmentation: create doubled training set with random augmentation
+    aug_X, aug_y = [], []
+    for i in range(len(X_train)):
+        seq = X_train[i]
+        if random.random() < 0.6:
+            aug_seq = augment_sequence(seq)
+            # ensure final length and feature-dim match
+            if aug_seq.shape[0] < Config.SEQUENCE_LENGTH:
+                pad = np.tile(aug_seq[-1:], (Config.SEQUENCE_LENGTH - aug_seq.shape[0], 1))
+                aug_seq = np.concatenate([aug_seq, pad], axis=0)
+            elif aug_seq.shape[0] > Config.SEQUENCE_LENGTH:
+                aug_seq = aug_seq[:Config.SEQUENCE_LENGTH]
+            aug_X.append(aug_seq)
+            aug_y.append(y_train[i])
+    if aug_X:
+        X_train = np.concatenate([X_train, np.array(aug_X, dtype=np.float32)], axis=0)
+        y_train_cat = to_categorical(np.concatenate([y_train, np.array(aug_y, dtype=np.int32)]), num_classes)
+
+    logging.info(f"Train samples: {len(X_train)}, Val samples: {len(X_test)}")
+
     history = model.fit(
         X_train, y_train_cat,
         validation_data=(X_test, y_test_cat),
-        epochs=40,
+        epochs=50,
         batch_size=16,
         callbacks=callbacks,
+        class_weight=class_weight,
         verbose=1
     )
 
-    # --- Evaluate ---
-    y_pred = np.argmax(model.predict(X_test), axis=1)
-    acc = accuracy_score(y_test, y_pred)
+    # evaluate
+    preds = np.argmax(model.predict(X_test), axis=1)
+    acc = accuracy_score(y_test, preds)
     logging.info(f"✅ Validation Accuracy: {acc*100:.2f}%")
-    print("\nClassification Report:\n", classification_report(y_test, y_pred, target_names=gestures))
+    print("\nClassification Report:\n", classification_report(y_test, preds, target_names=list(label_map.keys())))
 
-    # --- Save model and artifacts ---
-    model.save("gesture_lstm_model.h5")
-    with open(Config.LABELS_PATH, "wb") as f:
-        pickle.dump(label_map, f)
+    # save artifacts
+    model.save("gesture_lstm_model.keras")
     with open("scaler_lstm.pkl", "wb") as f:
         pickle.dump(scaler, f)
+    with open(Config.LABELS_PATH, "wb") as f:
+        pickle.dump(label_map, f)
 
-    logging.info("💾 Model saved as 'gesture_lstm_model.h5'")
-    logging.info("--- TRAINING COMPLETE ---")
+    metadata = {
+        "sequence_length": Config.SEQUENCE_LENGTH,
+        "feature_dim": X.shape[2],
+        "model_file": "gesture_lstm_model.keras"
+    }
+    with open("model_metadata.json", "w") as f:
+        json.dump(metadata, f, indent=2)
 
+    logging.info("💾 Model saved to 'gesture_lstm_model.keras' and metadata written to model_metadata.json")
 
 if __name__ == "__main__":
     main()
