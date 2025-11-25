@@ -12,6 +12,9 @@ from tensorflow.keras.utils import to_categorical
 from config import Config
 from features import FeatureExtractor
 
+# Fix for potential OpenMP runtime duplicate error on some systems
+os.environ['KMP_DUPLICATE_LIB_OK'] = 'True'
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
 def stable_attention_block(inputs):
@@ -49,25 +52,35 @@ def load_data():
         for fn in os.listdir(gdir):
             if not fn.endswith(".npy"): continue
             seq = np.load(os.path.join(gdir, fn)).astype(np.float32)
+            
+            # --- CHECK 1: Valid Shape ---
             if seq.ndim != 2 or seq.shape[1] != 774:
                 logging.warning(f"⚠️ Skipping {g}/{fn} shape={seq.shape}")
                 continue
-            # pad/trim to SEQUENCE_LENGTH
+            
+            # --- CHECK 2: Pad/Trim to Config.SEQUENCE_LENGTH ---
             if seq.shape[0] < Config.SEQUENCE_LENGTH:
                 pad = np.tile(seq[-1:], (Config.SEQUENCE_LENGTH - seq.shape[0], 1))
                 seq = np.concatenate([seq, pad], axis=0)
             elif seq.shape[0] > Config.SEQUENCE_LENGTH:
                 seq = seq[:Config.SEQUENCE_LENGTH]
+            
             features.append(seq)
             labels.append(idx)
-            groups.append(f"{g}_{fn}")
+            
+            # --- CRITICAL FIX: Grouping Strategy ---
+            # Ensure "0.npy" and "0_aug1.npy" belong to the same group.
+            # This prevents data leakage between Train and Val sets.
+            base_name = fn.split('_aug')[0].replace('.npy', '')
+            groups.append(f"{g}_{base_name}")
+
     X = np.array(features, dtype=np.float32)
     y = np.array(labels, dtype=np.int32)
     logging.info(f"✅ Loaded {len(X)} sequences across {len(label_map)} gestures")
     return X, y, label_map, groups
 
 def preprocess_and_scale(X, scaler=None, fit_scaler=False):
-    # per-feature z-score across all time & samples (as in earlier design)
+    # per-feature z-score across all time & samples
     X = (X - np.mean(X, axis=(0,1), keepdims=True)) / (np.std(X, axis=(0,1), keepdims=True) + 1e-6)
     ns, tfm, feat = X.shape
     X_reshaped = X.reshape(ns * tfm, feat)
@@ -81,35 +94,39 @@ def preprocess_and_scale(X, scaler=None, fit_scaler=False):
 
 def build_model(seq_len, feat_dim, num_classes):
     inp = Input(shape=(seq_len, feat_dim), name="input_layer")
-    x = LSTM(128, return_sequences=True, dropout=0.35, recurrent_dropout=0.15)(inp)
-    x = LSTM(64, return_sequences=True, dropout=0.35, recurrent_dropout=0.15)(x)
-    x = stable_attention_block(x)   # yields (batch, features)
-    x = Dense(64, activation='relu')(x)
+    
+    # REDUCED COMPLEXITY: Fewer units (64 instead of 128) to prevent overfitting
+    x = LSTM(64, return_sequences=True, dropout=0.4, recurrent_dropout=0.2)(inp)
+    
+    # Simplified Attention/Pooling
+    x = stable_attention_block(x)
+    
+    # Smaller Dense Layer
+    x = Dense(32, activation='relu')(x) # Reduced from 64
     x = Dropout(0.5)(x)
+    
     out = Dense(num_classes, activation='softmax')(x)
+    
     model = Model(inputs=inp, outputs=out)
-    model.compile(optimizer='adam',
-                  loss=tf.keras.losses.CategoricalCrossentropy(label_smoothing=0.05),
+    model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=0.0005), # Lower learning rate
+                  loss='categorical_crossentropy',
                   metrics=['accuracy'])
     return model
 
 def main():
     logging.info("--- 🚀 Starting Hybrid LSTM + Attention Training ---")
     if not os.path.exists(Config.DATA_PATH):
-        logging.error("❌ Data path missing.")
+        logging.error(f"❌ Data path '{Config.DATA_PATH}' missing.")
         return
     X, y, label_map, groups = load_data()
     if len(X) == 0:
-        logging.error("❌ No valid samples.")
+        logging.error("❌ No valid samples found.")
         return
-
-    # augmentation (on-the-fly) will be applied below by duplicating small fraction
-    ns = len(X)
 
     # Preprocess & scale
     X, scaler = preprocess_and_scale(X, scaler=None, fit_scaler=True)
 
-    # group-wise split to prevent same file duplicates in both sets
+    # GroupShuffleSplit prevents leakage of augmented versions of the same file
     gss = GroupShuffleSplit(n_splits=1, test_size=0.2, random_state=42)
     train_idx, test_idx = next(gss.split(X, y, groups))
     X_train, X_test = X[train_idx], X[test_idx]
@@ -119,7 +136,7 @@ def main():
     y_train_cat = to_categorical(y_train, num_classes)
     y_test_cat = to_categorical(y_test, num_classes)
 
-    # class weights
+    # Compute balanced class weights
     cw = compute_class_weight('balanced', classes=np.unique(y_train), y=y_train)
     class_weight = {i: float(w) for i,w in enumerate(cw)}
     logging.info(f"Class weights: {class_weight}")
@@ -127,20 +144,21 @@ def main():
     model = build_model(Config.SEQUENCE_LENGTH, X.shape[2], num_classes)
     model.summary(print_fn=logging.info)
 
-    # callbacks
+    # Callbacks
     callbacks = [
         EarlyStopping(monitor='val_loss', patience=8, restore_best_weights=True),
         ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=4, min_lr=1e-6, verbose=1),
         ModelCheckpoint("gesture_lstm_model.keras", save_best_only=True, monitor='val_loss')
     ]
 
-    # small on-the-fly augmentation: create doubled training set with random augmentation
+    # On-the-fly augmentation for training set
     aug_X, aug_y = [], []
     for i in range(len(X_train)):
         seq = X_train[i]
+        # Augment 60% of the data on the fly
         if random.random() < 0.6:
             aug_seq = augment_sequence(seq)
-            # ensure final length and feature-dim match
+            # Re-check shape consistency after augmentation
             if aug_seq.shape[0] < Config.SEQUENCE_LENGTH:
                 pad = np.tile(aug_seq[-1:], (Config.SEQUENCE_LENGTH - aug_seq.shape[0], 1))
                 aug_seq = np.concatenate([aug_seq, pad], axis=0)
@@ -148,11 +166,12 @@ def main():
                 aug_seq = aug_seq[:Config.SEQUENCE_LENGTH]
             aug_X.append(aug_seq)
             aug_y.append(y_train[i])
+            
     if aug_X:
         X_train = np.concatenate([X_train, np.array(aug_X, dtype=np.float32)], axis=0)
         y_train_cat = to_categorical(np.concatenate([y_train, np.array(aug_y, dtype=np.int32)]), num_classes)
 
-    logging.info(f"Train samples: {len(X_train)}, Val samples: {len(X_test)}")
+    logging.info(f"Train samples: {len(X_train)} | Val samples: {len(X_test)}")
 
     history = model.fit(
         X_train, y_train_cat,
@@ -164,13 +183,13 @@ def main():
         verbose=1
     )
 
-    # evaluate
+    # Evaluate
     preds = np.argmax(model.predict(X_test), axis=1)
     acc = accuracy_score(y_test, preds)
     logging.info(f"✅ Validation Accuracy: {acc*100:.2f}%")
-    print("\nClassification Report:\n", classification_report(y_test, preds, target_names=list(label_map.keys())))
+    print("\nClassification Report:\n", classification_report(y_test, preds, target_names=list(label_map.keys()), zero_division=0))
 
-    # save artifacts
+    # Save Artifacts
     model.save("gesture_lstm_model.keras")
     with open("scaler_lstm.pkl", "wb") as f:
         pickle.dump(scaler, f)

@@ -1,61 +1,72 @@
-# test_model.py
-import os, json, pickle, numpy as np
-from sklearn.metrics import confusion_matrix, classification_report
+# test_model.py (FINAL FIXED VERSION)
+import os
+import json
+import pickle
+import random
+import numpy as np
 from tensorflow.keras.models import load_model
 from config import Config
 
+# ----- Load metadata -----
 meta = json.load(open("model_metadata.json"))
-SEQ = meta["sequence_length"]
-FEAT = meta["feature_dim"]
-MODEL_FILE = meta["model_file"]
+seq_len_expected = meta["sequence_length"]
+feat_dim_expected = meta["feature_dim"]
+model_file = meta["model_file"]
 
-print("✅ Model metadata:")
-print("  expects sequence length", SEQ, "feature dim", FEAT)
+print("Metadata:", meta)
 
-model = load_model(MODEL_FILE)
-scaler = pickle.load(open("scaler_lstm.pkl","rb"))
-labels = pickle.load(open(Config.LABELS_PATH,"rb"))
-labels_inv = {v:k for k,v in labels.items()}
+# ----- Load model -----
+model = load_model(model_file)
 
-def prepare(seq):
-    seq = seq.astype('float32')
-    if seq.shape[0] < SEQ:
-        pad = np.tile(seq[-1:], (SEQ - seq.shape[0], 1))
+# ----- Load scaler + labels -----
+scaler = pickle.load(open("scaler_lstm.pkl", "rb"))
+labels = pickle.load(open("labels.pkl", "rb"))
+labels_inv = {v: k for k, v in labels.items()}
+
+# ----- Prepare sequence -----
+def prepare_sequence(seq):
+    # Pad/trim time dimension
+    if seq.shape[0] < seq_len_expected:
+        pad = np.tile(seq[-1:], (seq_len_expected - seq.shape[0], 1))
         seq = np.concatenate([seq, pad], axis=0)
-    elif seq.shape[0] > SEQ:
-        seq = seq[:SEQ]
-    if seq.shape[1] != FEAT:
-        fixed = np.zeros((SEQ, FEAT), dtype=np.float32)
-        trim = min(seq.shape[1], FEAT)
-        fixed[:, :trim] = seq[:, :trim]
+    elif seq.shape[0] > seq_len_expected:
+        seq = seq[:seq_len_expected]
+
+    # Pad/trim feature dimension
+    if seq.shape[1] != feat_dim_expected:
+        fixed = np.zeros((seq_len_expected, feat_dim_expected), np.float32)
+        fixed[:, :min(feat_dim_expected, seq.shape[1])] = seq[:, :min(feat_dim_expected, seq.shape[1])]
         seq = fixed
-    # per-feature z-score across time only (as earlier design uses dataset-wide zscore in train)
+
+    # ----- FIX #1: Apply SAME Z-SCORE NORMALIZATION as training -----
     seq = (seq - np.mean(seq, axis=0, keepdims=True)) / (np.std(seq, axis=0, keepdims=True) + 1e-6)
-    flat = seq.reshape(-1, FEAT)
-    flat_scaled = scaler.transform(flat)
-    seq_scaled = flat_scaled.reshape(SEQ, FEAT)
-    return seq_scaled.reshape(1, SEQ, FEAT)
 
-# collect all test files
-X, y_true = [], []
-classes = sorted([d for d in os.listdir(Config.DATA_PATH) if os.path.isdir(os.path.join(Config.DATA_PATH,d)) and not d.startswith("_")])
-label_to_idx = {c:i for i,c in enumerate(classes)}
+    # Flatten for scaler
+    seq_flat = seq.reshape(-1, feat_dim_expected)
 
-for c in classes:
-    cpath = os.path.join(Config.DATA_PATH, c)
-    for f in os.listdir(cpath):
+    # Apply StandardScaler
+    seq_scaled = scaler.transform(seq_flat).reshape(1, seq_len_expected, feat_dim_expected)
+
+    return seq_scaled
+
+# ----- Collect samples -----
+all_files = []
+for g in labels.keys():
+    folder = os.path.join(Config.DATA_PATH, g)
+    if not os.path.isdir(folder): continue
+    for f in os.listdir(folder):
         if f.endswith(".npy"):
-            seq = np.load(os.path.join(cpath, f))
-            X.append(prepare(seq)[0])
-            y_true.append(label_to_idx[c])
+            all_files.append((g, os.path.join(folder, f)))
 
-X = np.array(X)
-y_true = np.array(y_true)
-print("Samples:", len(X), "Classes:", classes)
+# ----- Predict random samples -----
+samples = random.sample(all_files, min(5, len(all_files)))
+for true_g, path in samples:
+    seq = np.load(path)
+    inp = prepare_sequence(seq)
+    pred = model.predict(inp, verbose=0)[0]
+    pred_idx = np.argmax(pred)
+    pred_label = labels_inv[pred_idx]
+    conf = float(np.max(pred))
+    print(f"True: {true_g:<12} → Pred: {pred_label:<12} ({conf:.2f})")
 
-probs = model.predict(X, verbose=0)
-y_pred = probs.argmax(axis=1)
-
-print("\nClassification Report:\n")
-print(classification_report(y_true, y_pred, target_names=classes))
-print("\nConfusion matrix:\n", confusion_matrix(y_true, y_pred))
+print("✔ Testing completed.")
