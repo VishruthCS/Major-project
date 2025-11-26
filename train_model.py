@@ -108,7 +108,7 @@ def build_model(seq_len, feat_dim, num_classes):
     out = Dense(num_classes, activation='softmax')(x)
     
     model = Model(inputs=inp, outputs=out)
-    model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=0.0005), # Lower learning rate
+    model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=0.001), # Lower learning rate
                   loss='categorical_crossentropy',
                   metrics=['accuracy'])
     return model
