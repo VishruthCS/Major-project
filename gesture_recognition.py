@@ -122,7 +122,7 @@ def main():
         return
 
     # 2. Camera setup
-    cap = cv2.VideoCapture(0)
+    cap = cv2.VideoCapture(0)  # or try cv2.CAP_MSMF
     if not cap.isOpened():
         logging.error("❌ Could not open webcam.")
         return
