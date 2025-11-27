@@ -1,50 +1,74 @@
+#
+# workers.py — Background workers (updated for Enhanced LSTM)
+#
+
+import numpy as np
+import pickle
 import queue
-import logging
 import requests
-import pyttsx3
+import time
 from config import Config
 
-def tts_worker(q, engine):
-    while True:
-        text = q.get()
-        if text is None: break
-        if text:
-            try:
-                engine.say(text)
-                engine.runAndWait()
-            except Exception as e:
-                logging.error(f"TTS Error: {e}")
-        q.task_done()
+# --- AI Model Worker ---
+def model_worker(in_q, out_q, model_path, labels_path, config_dict):
+    """
+    TensorFlow worker that runs in a separate process.
+    Loads the Enhanced LSTM model (.h5) and performs predictions.
+    """
+    print("[AI Worker] Starting LSTM model worker...")
 
-def gemini_worker(q_in, q_out):
-    if not Config.GEMINI_API_KEY:
-        print("❌ GEMINI_API_KEY not found.")
+    try:
+        from tensorflow.keras.models import load_model
+        model = load_model(model_path)
+        with open(labels_path, "rb") as f:
+            label_map = pickle.load(f)
+        inv_label_map = {v: k for k, v in label_map.items()}
+        print(f"[AI Worker] ✅ Loaded model with {len(label_map)} classes.")
+    except Exception as e:
+        print(f"[AI Worker] ❌ Error loading model: {e}")
+        out_q.put(f"ERROR: {e}")
         return
 
+    expected_features = 774
+    sequence_length = config_dict.get("SEQUENCE_LENGTH", 30)
+
+    while True:
+        sequence = in_q.get()
+        if sequence is None:
+            break
+        try:
+            inp = np.expand_dims(sequence, axis=0)
+            preds = model.predict(inp, verbose=0)[0]
+            best_idx, best_prob = int(np.argmax(preds)), float(np.max(preds))
+            gesture = inv_label_map.get(best_idx, "Unknown")
+            out_q.put((gesture, best_prob))
+        except Exception as e:
+            print(f"[AI Worker] Prediction failed: {e}")
+            out_q.put(("ERROR", 0.0))
+
+# --- Gemini Worker (unchanged) ---
+def gemini_worker(q_in, q_out):
+    API_KEY = Config.GEMINI_API_KEY
+    api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key={API_KEY}"
     while True:
         keywords = q_in.get()
-        if keywords is None: break
-
+        if keywords is None:
+            q_in.task_done()
+            break
         if not keywords:
-            q_out.put("No keywords provided.")
+            q_out.put("")
             q_in.task_done()
             continue
-
-        prompt = (
-            f"Form a grammatically correct English sentence from these sign keywords:\n"
-            f"{' '.join(keywords)}"
-        )
+        prompt = f"Form a grammatically correct English sentence from these keywords: {' '.join(keywords)}"
+        headers = {"Content-Type": "application/json"}
         payload = {"contents": [{"parts": [{"text": prompt}]}]}
-
         try:
-            response = requests.post(Config.GEMINI_URL, json=payload, timeout=15)
+            response = requests.post(api_url, json=payload, timeout=10)
             response.raise_for_status()
-            data = response.json()
-            sentence = data["candidates"][0]["content"]["parts"][0]["text"].strip()
-            q_out.put(sentence)
-        except requests.exceptions.Timeout:
-            q_out.put("Gemini API timeout — try again.")
+            result = response.json()
+            sentence = result["candidates"][0]["content"]["parts"][0]["text"]
+            q_out.put(sentence.strip())
         except Exception as e:
-            q_out.put(f"API Error: {e}")
-        finally:
-            q_in.task_done()
+            print(f"[Gemini Worker] Error: {e}")
+            q_out.put("API Error.")
+        q_in.task_done()
