@@ -67,7 +67,7 @@ def gemini_worker(q_in, q_out):
 
         prompt = (
             "You are a helpful assistant for a sign language user. "
-            "Convert these keywords into a natural, grammatically correct English sentence. "
+            "Convert these keywords into a natural, grammatically correct English sentence add connecting words if needed. "
             "Keywords: " + " ".join(keywords)
         )
         
