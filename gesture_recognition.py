@@ -1,10 +1,11 @@
 # gesture_recognition.py
 #
-# Step 3: Gesture Recognition (FINAL UPDATED VERSION)
+# Step 3: Gesture Recognition (FINAL FIXED VERSION)
 # ✅ Correctly loads the new .keras model
-# ✅ Correctly loads the Scaler (CRITICAL for accuracy)
-# ✅ Smoother predictions with probability buffering
+# ✅ Correctly loads the Scaler
 # ✅ Thread-safe Gemini & TTS
+# ✅ Smarter Motion Trigger (Left/Right Hand Independence)
+# ✅ FIXED: NameError on 'seq'
 #
 
 import cv2
@@ -67,7 +68,7 @@ def gemini_worker(q_in, q_out):
 
         prompt = (
             "You are a helpful assistant for a sign language user. "
-            "Convert these keywords into a natural, grammatically correct English sentence add connecting words if needed. "
+            "Convert these keywords into a natural, grammatically correct English sentence add connecting words if needed make a sentance and add hi at the start. "
             "Keywords: " + " ".join(keywords)
         )
         
@@ -110,7 +111,7 @@ def main():
             label_map = pickle.load(f)
             
         # CRITICAL: Load the scaler used in training
-        scaler_path = "scaler_lstm.pkl"
+        scaler_path = "models\scaler_lstm.pkl"
         logging.info(f"Loading scaler from {scaler_path}...")
         with open(scaler_path, "rb") as f:
             scaler = pickle.load(f)
@@ -170,11 +171,22 @@ def main():
             # Extract features
             enhanced_features = feature_extractor.extract_enhanced_features(results)
             
-            # --- Logic: Dynamic Gesture Detection ---
-            # Calculate motion magnitude (how much did we move since last frame?)
-            # We look at velocity features (indices 258 to 516)
-            velocity = enhanced_features[258:516] 
-            motion = np.mean(np.abs(velocity))
+            # --- Logic: Dynamic Gesture Detection (SMARTER TRIGGER) ---
+            # Velocity Indices derived from features.py:
+            # Full Velocity Block: indices 258 to 516 (258 total features)
+            #   - Pose Vel (132 dims): 258 -> 390
+            #   - LH Vel   (63 dims):  390 -> 453
+            #   - RH Vel   (63 dims):  453 -> 516
+
+            vel_lh = enhanced_features[390 : 453]
+            vel_rh = enhanced_features[453 : 516]
+
+            # Calculate intensity for each hand separately
+            motion_lh = np.mean(np.abs(vel_lh))
+            motion_rh = np.mean(np.abs(vel_rh))
+            
+            # Trigger if EITHER hand is moving significantly
+            motion = max(motion_lh, motion_rh)
 
             # 1. Start Recording
             if not is_recording and motion > START_THRESHOLD and time.time() > motion_cooldown:
@@ -202,8 +214,7 @@ def main():
                         else:
                             seq_arr = seq_arr[:Config.SEQUENCE_LENGTH]
                         
-                        # Scale Data (Crucial Step!)
-                        # We reshape to (total_frames, features), scale, then reshape back
+                        # Scale Data
                         flat = seq_arr.reshape(-1, 774)
                         scaled = scaler.transform(flat)
                         final_input = scaled.reshape(1, Config.SEQUENCE_LENGTH, 774)
@@ -218,7 +229,9 @@ def main():
                         pred_label = inv_map.get(best_idx, "Unknown")
                         
                         # Threshold Check
-                        if best_prob > 0.65: # Only accept confident predictions
+                        threshold = getattr(Config, 'CONF_THRESHOLD', 0.65)
+                        
+                        if best_prob > threshold: # Only accept confident predictions
                             prediction_text = f"✅ {pred_label}"
                             prob_text = f"({best_prob:.0%})"
                             

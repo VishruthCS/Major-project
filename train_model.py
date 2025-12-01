@@ -1,5 +1,6 @@
 # train_model.py (FIXED)
 import os, json, logging, pickle, random, numpy as np
+from unicodedata import bidirectional
 from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import GroupShuffleSplit
 from sklearn.utils.class_weight import compute_class_weight
@@ -9,6 +10,7 @@ from tensorflow.keras.models import Model
 from tensorflow.keras.layers import Input, LSTM, Dense, Dropout, Multiply, Softmax, GlobalAveragePooling1D
 from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau, ModelCheckpoint
 from tensorflow.keras.utils import to_categorical
+from tensorflow.keras.layers import Bidirectional
 from config import Config
 
 # Fix for potential OpenMP runtime duplicate error on some systems
@@ -100,7 +102,7 @@ def build_model(seq_len, feat_dim, num_classes):
     inp = Input(shape=(seq_len, feat_dim), name="input_layer")
     
     # LSTM Layers
-    x = LSTM(64, return_sequences=True, dropout=0.4, recurrent_dropout=0.2)(inp)
+    x = Bidirectional(LSTM(64, return_sequences=True, dropout=0.4, recurrent_dropout=0.2))(inp)
     
     # Attention
     x = stable_attention_block(x)
@@ -160,7 +162,7 @@ def main():
     callbacks = [
         EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True),
         ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=5, min_lr=1e-6, verbose=1),
-        ModelCheckpoint("gesture_lstm_model.keras", save_best_only=True, monitor='val_loss')
+        ModelCheckpoint("models/gesture_lstm_model.keras", save_best_only=True, monitor='val_loss')
     ]
 
     # On-the-fly augmentation
@@ -202,8 +204,8 @@ def main():
     print("\nClassification Report:\n", classification_report(y_test, preds, target_names=list(label_map.keys()), zero_division=0))
 
     # Save
-    model.save("gesture_lstm_model.keras")
-    with open("scaler_lstm.pkl", "wb") as f:
+    model.save("models/gesture_lstm_model.keras")
+    with open("models/scaler_lstm.pkl", "wb") as f:
         pickle.dump(scaler, f)
     with open(Config.LABELS_PATH, "wb") as f:
         pickle.dump(label_map, f)
@@ -211,12 +213,12 @@ def main():
     metadata = {
         "sequence_length": Config.SEQUENCE_LENGTH,
         "feature_dim": X_train.shape[2],
-        "model_file": "gesture_lstm_model.keras"
+        "model_file": "models/gesture_lstm_model.keras"
     }
-    with open("model_metadata.json", "w") as f:
+    with open("models/model_metadata.json", "w") as f:
         json.dump(metadata, f, indent=2)
 
-    logging.info("💾 Model saved to 'gesture_lstm_model.keras' and metadata written to model_metadata.json")
+    logging.info("💾 Model saved to 'models/gesture_lstm_model.keras' and metadata written to models/model_metadata.json")
 
 if __name__ == "__main__":
     main()

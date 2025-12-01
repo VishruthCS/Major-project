@@ -16,12 +16,11 @@ class Config:
     
     # --- Project File Paths ---
     # We use a new data path to store our new, enhanced features
-    DATA_PATH = "gesture_data"
+    DATA_PATH = "models/gesture_data"
     # --- NEW MODEL PATHS ---
-    MODEL_PATH = "gesture_lstm_model.keras" # We are using a KNN model
-    LABELS_PATH = "enhanced_labels.pkl"
-    SCALER_PATH = "scaler_lstm.pkl"
-
+    MODEL_PATH = "models/gesture_lstm_model.keras" # We are using a KNN model
+    LABELS_PATH = "models/enhanced_labels.pkl"
+    SCALER_PATH = "models/scaler_lstm.pkl"
     feature_dim = 774
 
     # --- Model & Data Parameters ---
