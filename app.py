@@ -229,7 +229,7 @@ def recognition_page():
             model = load_model(Config.MODEL_PATH)
             with open(Config.LABELS_PATH, "rb") as f:
                 label_map = pickle.load(f)
-            with open("scaler_lstm.pkl", "rb") as f:
+            with open("models/scaler_lstm.pkl", "rb") as f:
                 scaler = pickle.load(f)
         except Exception as e:
             st.error(f"Error: {e}. Train the model first!")
