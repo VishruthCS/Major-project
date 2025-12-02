@@ -1,10 +1,9 @@
-# gesture_recognition.py
 #
-# Step 3: Gesture Recognition (FINAL UPDATED VERSION)
-# ✅ Correctly loads the new .keras model
-# ✅ Correctly loads the Scaler (CRITICAL for accuracy)
-# ✅ Smoother predictions with probability buffering
-# ✅ Thread-safe Gemini & TTS
+# Step 3: Gesture Recognition (FINAL DEBUG VERSION)
+#
+# Changes:
+# - Added VERBOSE LOGGING to the Gemini Worker to see exactly why API fails.
+# - Removed "gemini-2.5-flash" if it's causing 404s (sticking to stable models).
 #
 
 import cv2
@@ -40,15 +39,21 @@ def tts_worker(q, engine):
                 logging.error(f"TTS Error: {e}")
         q.task_done()
 
-# --- Gemini Worker (with retry & cooldown) ---
+# --- Gemini Worker (DEBUG MODE) ---
 def gemini_worker(q_in, q_out):
     api_key = (getattr(Config, "GEMINI_API_KEY", "") or "").strip()
-    if not api_key:
-        logging.error("❌ Gemini worker: API key missing in Config.")
     
+    # Debug print to confirm key is loaded (masking part of it for safety)
+    if api_key:
+        print(f"[Gemini Debug] API Key loaded: {api_key[:5]}...{api_key[-4:]}")
+    else:
+        print("[Gemini Debug] ❌ API Key NOT found!")
+
     COOLDOWN_SECONDS = 2.0
     last_call_time = 0
-    models_to_try = ["gemini-2.5-flash", "gemini-1.5-flash", "gemini-pro"]
+    
+    # Use standard, stable model names first
+    models_to_try = ["gemini-2.5-flash", "gemini-pro"]
 
     while True:
         keywords = q_in.get()
@@ -67,7 +72,8 @@ def gemini_worker(q_in, q_out):
 
         prompt = (
             "You are a helpful assistant for a sign language user. "
-            "Convert these keywords into a natural, grammatically correct English sentence add connecting words if needed. "
+            "Convert these keywords into a natural, grammatically correct English sentence. "
+            "Add connecting words if needed. "
             "Keywords: " + " ".join(keywords)
         )
         
@@ -75,21 +81,40 @@ def gemini_worker(q_in, q_out):
         payload = {"contents": [{"parts": [{"text": prompt}]}]}
 
         sent_ok = False
+        print(f"\n[Gemini Debug] Sending keywords: {keywords}")
+
         for model_name in models_to_try:
             url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
+            print(f"[Gemini Debug] Trying model: {model_name}...")
+            
             try:
-                resp = requests.post(url, headers=headers, json=payload, timeout=5)
+                resp = requests.post(url, headers=headers, json=payload, timeout=8)
+                
+                print(f"[Gemini Debug] Status Code: {resp.status_code}")
+                
                 if resp.status_code == 200:
                     data = resp.json()
-                    text = data.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "").strip()
-                    if text:
-                        q_out.put(text)
-                        sent_ok = True
-                        break
-            except Exception:
+                    # Extract text safely
+                    try:
+                        text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
+                        print(f"[Gemini Debug] ✅ Success! API returned: '{text}'")
+                        if text:
+                            q_out.put(text)
+                            sent_ok = True
+                            break
+                    except (KeyError, IndexError) as e:
+                         print(f"[Gemini Debug] ❌ JSON Parse Error: {e}")
+                         print(f"[Gemini Debug] Raw JSON: {data}")
+
+                else:
+                    print(f"[Gemini Debug] ❌ API Error: {resp.text}")
+            
+            except Exception as e:
+                print(f"[Gemini Debug] ❌ Network/Request Error: {e}")
                 continue
         
         if not sent_ok:
+            print("[Gemini Debug] ⚠️ All models failed. Using fallback (raw keywords).")
             # Fallback if AI fails: just join keywords
             q_out.put(" ".join(keywords))
         
@@ -101,6 +126,7 @@ def main():
 
     # 1. Load Model, Labels, AND Scaler
     model, label_map, scaler = None, None, None
+    model_loaded = False
     try:
         logging.info(f"Loading model from {Config.MODEL_PATH}...")
         model = load_model(Config.MODEL_PATH)
@@ -110,11 +136,16 @@ def main():
             label_map = pickle.load(f)
             
         # CRITICAL: Load the scaler used in training
-        scaler_path = "scaler_lstm.pkl"
+        scaler_path = "models/scaler_lstm.pkl"
+        # Fallback scaler path check
+        if not os.path.exists(scaler_path):
+            scaler_path = "models/scaler_lstm.pkl" 
+            
         logging.info(f"Loading scaler from {scaler_path}...")
         with open(scaler_path, "rb") as f:
             scaler = pickle.load(f)
 
+        model_loaded = True
         logging.info("✅ All AI components loaded successfully.")
         
     except Exception as e:
@@ -170,11 +201,22 @@ def main():
             # Extract features
             enhanced_features = feature_extractor.extract_enhanced_features(results)
             
-            # --- Logic: Dynamic Gesture Detection ---
-            # Calculate motion magnitude (how much did we move since last frame?)
-            # We look at velocity features (indices 258 to 516)
-            velocity = enhanced_features[258:516] 
-            motion = np.mean(np.abs(velocity))
+            # --- Logic: Dynamic Gesture Detection (SMARTER TRIGGER) ---
+            # Velocity Indices derived from features.py:
+            # Full Velocity Block: indices 258 to 516 (258 total features)
+            #   - Pose Vel (132 dims): 258 -> 390
+            #   - LH Vel   (63 dims):  390 -> 453
+            #   - RH Vel   (63 dims):  453 -> 516
+
+            vel_lh = enhanced_features[390 : 453]
+            vel_rh = enhanced_features[453 : 516]
+
+            # Calculate intensity for each hand separately
+            motion_lh = np.mean(np.abs(vel_lh))
+            motion_rh = np.mean(np.abs(vel_rh))
+            
+            # Trigger if EITHER hand is moving significantly
+            motion = max(motion_lh, motion_rh)
 
             # 1. Start Recording
             if not is_recording and motion > START_THRESHOLD and time.time() > motion_cooldown:
@@ -202,8 +244,7 @@ def main():
                         else:
                             seq_arr = seq_arr[:Config.SEQUENCE_LENGTH]
                         
-                        # Scale Data (Crucial Step!)
-                        # We reshape to (total_frames, features), scale, then reshape back
+                        # Scale Data
                         flat = seq_arr.reshape(-1, 774)
                         scaled = scaler.transform(flat)
                         final_input = scaled.reshape(1, Config.SEQUENCE_LENGTH, 774)
@@ -218,7 +259,9 @@ def main():
                         pred_label = inv_map.get(best_idx, "Unknown")
                         
                         # Threshold Check
-                        if best_prob > 0.65: # Only accept confident predictions
+                        threshold = getattr(Config, 'CONF_THRESHOLD', 0.65)
+                        
+                        if best_prob > threshold: # Only accept confident predictions
                             prediction_text = f"✅ {pred_label}"
                             prob_text = f"({best_prob:.0%})"
                             
@@ -278,6 +321,4 @@ def main():
     gemini_q_in.put(None)
 
 if __name__ == "__main__":
-    # Fix for multiprocessing on Windows
-    # mp.freeze_support() 
     main()

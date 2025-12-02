@@ -1,5 +1,5 @@
 {
   "sequence_length": 40,
   "feature_dim": 774,
-  "model_file": "gesture_lstm_model.keras"
+  "model_file": "models/gesture_lstm_model.keras"
 }
