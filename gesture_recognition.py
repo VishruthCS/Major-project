@@ -53,7 +53,7 @@ def gemini_worker(q_in, q_out):
     last_call_time = 0
     
     # Use standard, stable model names first
-    models_to_try = ["gemini-2.5-flash", "gemini-pro"]
+    models_to_try = ["gemini-2.5-flash", "gemini-2.5-pro"]
 
     while True:
         keywords = q_in.get()
@@ -72,7 +72,7 @@ def gemini_worker(q_in, q_out):
 
         prompt = (
             "You are a helpful assistant for a sign language user. "
-            "Convert these keywords into a natural, grammatically correct English sentence. "
+            "Convert these keywords into a natural, grammatically correct English sentence dont give multiple sentence give one based on prompt. "
             "Add connecting words if needed. "
             "Keywords: " + " ".join(keywords)
         )
@@ -88,7 +88,7 @@ def gemini_worker(q_in, q_out):
             print(f"[Gemini Debug] Trying model: {model_name}...")
             
             try:
-                resp = requests.post(url, headers=headers, json=payload, timeout=8)
+                resp = requests.post(url, headers=headers, json=payload, timeout=20)
                 
                 print(f"[Gemini Debug] Status Code: {resp.status_code}")
                 
