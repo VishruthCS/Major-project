@@ -69,7 +69,7 @@ def get_gemini_sentence(keywords):
     payload = {"contents": [{"parts": [{"text": prompt}]}]}
     
     try:
-        response = requests.post(url, json=payload, timeout=5)
+        response = requests.post(url, json=payload, timeout=30)
         if response.status_code == 200:
             return response.json().get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
     except:
