@@ -33,6 +33,6 @@ class Config:
     PREDICTION_SMOOTHING = 7
     
     # --- Hybrid AI Parameters ---
-    PAUSE_THRESHOLD = 2.5 
+    PAUSE_THRESHOLD = 1.5 
     TTS_COOLDOWN = 1.5
 

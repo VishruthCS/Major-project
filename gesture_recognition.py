@@ -73,7 +73,7 @@ def gemini_worker(q_in, q_out):
         prompt = (
             "You are a helpful assistant for a sign language user. "
             "Convert these keywords into a natural, grammatically correct English sentence dont give multiple sentence give one based on prompt. "
-            "Add connecting words if needed. "
+            "Add connecting words if needed and ignore nothing. "
             "Keywords: " + " ".join(keywords)
         )
         
@@ -269,7 +269,7 @@ def main():
                             if not sentence_keywords or sentence_keywords[-1] != pred_label:
                                 sentence_keywords.append(pred_label)
                         else:
-                            prediction_text = "❓ Unsure"
+                            prediction_text = "❓ NO ACTION"
                             prob_text = f"({best_prob:.0%})"
                     else:
                         prediction_text = "❌ Too Short"
