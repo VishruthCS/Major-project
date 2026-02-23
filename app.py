@@ -9,7 +9,6 @@ import threading
 import queue
 import pyttsx3
 import requests
-from collections import deque
 from tensorflow.keras.models import load_model
 
 # --- Import your project modules ---
@@ -19,13 +18,33 @@ from utils import FeatureExtractor, draw_styled_landmarks
 # --- Page Config ---
 st.set_page_config(page_title="Sign Language AI", layout="wide")
 
-# --- Initialize Session State ---
-if 'recording' not in st.session_state:
-    st.session_state['recording'] = False
-if 'sequence_buffer' not in st.session_state:
-    st.session_state['sequence_buffer'] = []
-if 'sentence' not in st.session_state:
-    st.session_state['sentence'] = []
+# ==========================================
+# LOW-LATENCY CAMERA THREAD
+# ==========================================
+class CameraStream:
+    """Runs camera in a background thread to prevent frame buffering lag."""
+    def __init__(self, src=0):
+        self.cap = cv2.VideoCapture(src)
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+        self.ret, self.frame = self.cap.read()
+        self.running = True
+        self.thread = threading.Thread(target=self.update, daemon=True)
+        self.thread.start()
+
+    def update(self):
+        while self.running:
+            ret, frame = self.cap.read()
+            if ret:
+                self.frame = frame
+
+    def read(self):
+        return self.ret, self.frame
+
+    def release(self):
+        self.running = False
+        self.thread.join()
+        self.cap.release()
 
 # --- Helper Functions ---
 def ensure_dir(path):
@@ -35,9 +54,20 @@ def ensure_dir(path):
 # --- MediaPipe Setup ---
 mp_holistic = mp.solutions.holistic
 
-# --- TTS Worker (Background Thread) ---
-# We use a global queue for TTS so it doesn't block the Streamlit UI
-tts_queue = queue.Queue()
+# ==========================================
+# BACKGROUND WORKERS (Prevents UI Freezing)
+# ==========================================
+
+# ✅ FIX: Store queues in session_state so Streamlit doesn't delete them on re-runs
+if 'tts_queue' not in st.session_state:
+    st.session_state.tts_queue = queue.Queue()
+    st.session_state.gemini_in_q = queue.Queue()
+    st.session_state.gemini_out_q = queue.Queue()
+
+tts_queue = st.session_state.tts_queue
+gemini_in_q = st.session_state.gemini_in_q
+gemini_out_q = st.session_state.gemini_out_q
+
 def tts_loop():
     engine = pyttsx3.init()
     while True:
@@ -50,22 +80,18 @@ def tts_loop():
                 pass
         tts_queue.task_done()
 
-# Start TTS thread once
-if 'tts_started' not in st.session_state:
-    t = threading.Thread(target=tts_loop, daemon=True)
-    t.start()
-    st.session_state['tts_started'] = True
-
-# --- Gemini API Call ---
 def get_gemini_sentence(keywords):
-    if not keywords:
-        return ""
     api_key = Config.GEMINI_API_KEY
     if not api_key or "YOUR_GEMINI" in api_key:
-        return " ".join(keywords) # Fallback
-
+        return " ".join(keywords) # Fallback if no key
+    
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
-    prompt = f"Convert these sign language keywords into a natural English sentence: {' '.join(keywords)}"
+    prompt = (
+            "You are a helpful assistant for a sign language user. "
+            "Convert these keywords into a natural, grammatically correct English sentence dont give multiple sentence give one based on prompt. "
+            "Add connecting words if needed and ignore nothing. "
+            "Keywords: " + " ".join(keywords)
+        )
     payload = {"contents": [{"parts": [{"text": prompt}]}]}
     
     try:
@@ -76,8 +102,22 @@ def get_gemini_sentence(keywords):
         pass
     return " ".join(keywords)
 
+def gemini_worker_loop():
+    while True:
+        keywords = gemini_in_q.get()
+        if keywords:
+            sentence = get_gemini_sentence(keywords)
+            gemini_out_q.put(sentence)
+        gemini_in_q.task_done()
+
+# Start background threads only ONCE
+if 'threads_started' not in st.session_state:
+    threading.Thread(target=tts_loop, daemon=True).start()
+    threading.Thread(target=gemini_worker_loop, daemon=True).start()
+    st.session_state['threads_started'] = True
+
 # ==========================================
-# 1. DATA COLLECTION PAGE
+# 1. DATA COLLECTION PAGE (FIXED)
 # ==========================================
 def data_collection_page():
     st.header("📷 Data Collection")
@@ -85,7 +125,7 @@ def data_collection_page():
     col1, col2 = st.columns([1, 2])
     
     with col1:
-        gesture_name = st.text_input("Enter Gesture Name")
+        gesture_name = st.text_input("Enter Gesture Name", key="gesture_input")
         st.info(f"Target Sequence Length: {Config.SEQUENCE_LENGTH} frames")
         
         # Stats
@@ -102,20 +142,20 @@ def data_collection_page():
         status_text = st.empty()
         frame_window = st.image([])
 
+    # ✅ Button OUTSIDE the while loop.
+    record_btn = st.sidebar.button("Capture Sample", disabled=not gesture_name, key="record_btn")
+
     if run_camera:
-        cap = cv2.VideoCapture(0)
-        # Fix resolution
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640) 
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-        
+        cap = CameraStream(0)
         extractor = FeatureExtractor()
         recording_buffer = []
-        is_recording = False
-
-        # Create buttons inside the loop using a trick or placement outside
-        # For Streamlit, we use keyboard shortcuts or sidebar buttons usually, 
-        # but here let's use a "Record" checkbox in sidebar for simplicity
         
+        # Set recording state based on the button click
+        is_recording = record_btn 
+        
+        if is_recording:
+            status_text.warning("🔴 Recording...")
+
         with mp_holistic.Holistic(min_detection_confidence=0.5, min_tracking_confidence=0.5) as holistic:
             while run_camera:
                 ret, frame = cap.read()
@@ -127,15 +167,8 @@ def data_collection_page():
                 image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 results = holistic.process(image)
                 draw_styled_landmarks(image, results)
-                
-                # Logic
-                record_btn = st.sidebar.button("Capture Sample", disabled=not gesture_name)
-                
-                if record_btn:
-                    is_recording = True
-                    recording_buffer = []
-                    status_text.warning("🔴 Recording...")
 
+                # Recording Logic
                 if is_recording:
                     features = extractor.extract_enhanced_features(results)
                     recording_buffer.append(features)
@@ -145,79 +178,63 @@ def data_collection_page():
                                 cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 2)
                     
                     if len(recording_buffer) == Config.SEQUENCE_LENGTH:
-                        is_recording = False
-                        # Save
+                        is_recording = False # Stop recording
+                        
+                        # Save Data
                         g_path = os.path.join(Config.DATA_PATH, gesture_name)
                         ensure_dir(g_path)
                         file_id = len([f for f in os.listdir(g_path) if f.endswith('.npy')])
                         np.save(os.path.join(g_path, f"{file_id}.npy"), np.array(recording_buffer))
+                        
                         status_text.success(f"✅ Saved sample {file_id}!")
-                        time.sleep(0.5) # Short pause
-                        st.rerun() # Refresh to update counts
+                        
+                        # Stop camera gracefully and refresh to reset button state and update counts
+                        cap.release()
+                        time.sleep(0.5) 
+                        st.rerun() 
 
                 # Display
                 frame_window.image(image, channels="RGB")
 
-        cap.release()
+        # Failsafe release if loop breaks
+        if cap.running:
+            cap.release()
 
 # ==========================================
 # 2. TRAINING PAGE
 # ==========================================
 def training_page():
     st.header("🧠 Model Training")
-    st.write("Train the LSTM model on your collected data.")
-    
     if st.button("Start Training"):
-        status_area = st.empty()
-        status_area.info("⏳ Loading data and starting training... check terminal for details.")
-        
-        # Run the existing training script logic
+        status = st.empty()
+        status.info("⏳ Training in progress...")
         try:
             import train_model
-            # Redirect stdout to a string buffer if you want to show logs in UI
-            # For now, we just run the main function
             train_model.main()
-            status_area.success("✅ Training Complete! Model saved.")
+            status.success("✅ Training Complete! Model saved.")
             st.balloons()
         except Exception as e:
-            status_area.error(f"Error during training: {e}")
+            status.error(f"Error: {e}")
 
-# ==========================================
-# 3. RECOGNITION PAGE
-# ==========================================
-# ==========================================
-# 3. RECOGNITION PAGE (UPDATED)
-# ==========================================
 # ==========================================
 # 3. RECOGNITION PAGE (OPTIMIZED)
 # ==========================================
 def recognition_page():
     st.header("🗣️ Real-Time Recognition")
     
-    # Layout
     col1, col2 = st.columns([3, 1])
     
     with col2:
         st.subheader("Settings")
-        # ✅ FIX 1: Add Mirror Option
-        mirror_mode = st.checkbox("Mirror Camera (Selfie Mode)", value=True)
-        
+        mirror_mode = st.checkbox("Mirror Camera", value=True)
         st.divider()
-        st.subheader("Prediction")
         pred_placeholder = st.empty()
         prob_placeholder = st.empty()
-        
         st.divider()
-        st.subheader("📝 Raw Keywords")
         keywords_placeholder = st.empty()
-        
-        st.divider()
-        st.subheader("🤖 Gemini AI Output")
         gemini_placeholder = st.empty()
 
-        st.write("") 
         if st.button("Clear All"):
-            st.session_state['sentence'] = []
             st.rerun()
 
     with col1:
@@ -232,16 +249,10 @@ def recognition_page():
             with open("models/scaler_lstm.pkl", "rb") as f:
                 scaler = pickle.load(f)
         except Exception as e:
-            st.error(f"Error: {e}. Train the model first!")
+            st.error(f"Error loading model: {e}")
             return
 
-        cap = cv2.VideoCapture(0)
-        
-        # ✅ FIX 2: LOWER RESOLUTION FOR SPEED
-        # Streamlit cannot handle 1280x720 smoothly. 640x480 is much faster.
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-
+        cap = CameraStream(0) # Threaded Camera for Zero Lag
         extractor = FeatureExtractor()
         sequence_buffer = []
         sentence_words = []
@@ -251,11 +262,8 @@ def recognition_page():
         with mp_holistic.Holistic(min_detection_confidence=0.5, min_tracking_confidence=0.5) as holistic:
             while run_rec:
                 ret, frame = cap.read()
-                if not ret: 
-                    st.error("Camera disconnected")
-                    break
+                if not ret: break
                 
-                # ✅ FIX 3: MIRRORING logic
                 if mirror_mode:
                     frame = cv2.flip(frame, 1)
 
@@ -263,7 +271,6 @@ def recognition_page():
                 results = holistic.process(image)
                 draw_styled_landmarks(image, results)
                 
-                # Feature Extraction & Prediction Logic (Same as before)
                 features = extractor.extract_enhanced_features(results)
                 sequence_buffer.append(features)
                 if len(sequence_buffer) > Config.SEQUENCE_LENGTH:
@@ -273,14 +280,12 @@ def recognition_page():
                     motion = np.mean(np.abs(np.array(sequence_buffer)[-1] - np.array(sequence_buffer)[-5]))
                     
                     if motion > 0.015: 
-                        data = np.array(sequence_buffer)
-                        data_flat = data.reshape(-1, 774)
-                        data_scaled = scaler.transform(data_flat).reshape(1, Config.SEQUENCE_LENGTH, 774)
+                        data = np.array(sequence_buffer).reshape(-1, 774)
+                        data_scaled = scaler.transform(data).reshape(1, Config.SEQUENCE_LENGTH, 774)
                         
                         probs = model.predict(data_scaled, verbose=0)[0]
                         best_idx = np.argmax(probs)
                         confidence = probs[best_idx]
-                        
                         inv_map = {v: k for k, v in label_map.items()}
                         pred_label = inv_map[best_idx]
                         
@@ -288,10 +293,10 @@ def recognition_page():
                             pred_placeholder.markdown(f"### ✅ {pred_label}")
                             prob_placeholder.progress(float(confidence))
                         else:
-                            pred_placeholder.markdown(f"❓ Unsure ({pred_label})")
+                            pred_placeholder.markdown(f"❓ Unsure")
                             prob_placeholder.progress(float(confidence))
                         
-                        # Sentence Logic
+                        # Trigger sentence parsing smoothly
                         if confidence > CONF_THRESHOLD and (time.time() - last_pred_time > 1.5):
                             if not sentence_words or sentence_words[-1] != pred_label:
                                 sentence_words.append(pred_label)
@@ -300,30 +305,32 @@ def recognition_page():
                                 
                                 if len(sentence_words) >= 2:
                                     gemini_placeholder.text("🤔 AI is thinking...")
-                                    final_sent = get_gemini_sentence(sentence_words)
-                                    gemini_placeholder.success(final_sent)
-                                    tts_queue.put(final_sent) 
+                                    # ✅ FIX: Pass a COPY of the list to prevent reference modification bugs
+                                    gemini_in_q.put(list(sentence_words)) 
                                 else:
                                     tts_queue.put(pred_label) 
                 
-                # Display Frame
+                # Check if Gemini replied without blocking the video feed
+                try:
+                    ai_sentence = gemini_out_q.get_nowait()
+                    gemini_placeholder.success(ai_sentence)
+                    tts_queue.put(ai_sentence)
+                except queue.Empty:
+                    pass
+
                 frame_window.image(image, channels="RGB")
 
-        cap.release()
+        # Failsafe release if loop breaks
+        if cap.running:
+            cap.release()
 
-# ==========================================
-# MAIN ROUTER
-# ==========================================
 def main():
     st.sidebar.title("Hand Gesture AI")
     mode = st.sidebar.radio("Go to:", ["Data Collection", "Train Model", "Recognition"])
     
-    if mode == "Data Collection":
-        data_collection_page()
-    elif mode == "Train Model":
-        training_page()
-    elif mode == "Recognition":
-        recognition_page()
+    if mode == "Data Collection": data_collection_page()
+    elif mode == "Train Model": training_page()
+    elif mode == "Recognition": recognition_page()
 
 if __name__ == "__main__":
     main()
