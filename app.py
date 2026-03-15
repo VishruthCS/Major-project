@@ -2,83 +2,59 @@ import streamlit as st
 import cv2
 import numpy as np
 import mediapipe as mp
-import os
 import pickle
-import requests
-from tensorflow.keras.models import load_model
+from streamlit_webrtc import webrtc_streamer, VideoTransformerBase
 
 from config import Config
 from utils import FeatureExtractor, draw_styled_landmarks
-
-st.set_page_config(page_title="Sign Language AI", layout="wide")
+from tensorflow.keras.models import load_model
 
 mp_holistic = mp.solutions.holistic
 
+st.set_page_config(page_title="Sign Language AI", layout="wide")
 
-# ===============================
-# Helper
-# ===============================
+st.title("🤟 Sign Language Recognition")
 
-def ensure_dir(path):
-    if not os.path.exists(path):
-        os.makedirs(path)
+# -------------------------
+# Load Model
+# -------------------------
 
+@st.cache_resource
+def load_ai():
 
-# ===============================
-# Gemini AI
-# ===============================
+    model = load_model(Config.MODEL_PATH)
 
-def get_gemini_sentence(keywords):
+    with open(Config.LABELS_PATH, "rb") as f:
+        label_map = pickle.load(f)
 
-    api_key = Config.GEMINI_API_KEY
+    with open(Config.SCALER_PATH, "rb") as f:
+        scaler = pickle.load(f)
 
-    if not api_key or "YOUR_GEMINI" in api_key:
-        return " ".join(keywords)
+    return model, label_map, scaler
 
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
+model, label_map, scaler = load_ai()
 
-    prompt = (
-        "Convert these keywords into a natural English sentence: "
-        + " ".join(keywords)
-    )
+inv_map = {v: k for k, v in label_map.items()}
 
-    payload = {"contents": [{"parts": [{"text": prompt}]}]}
+extractor = FeatureExtractor()
 
-    try:
-        r = requests.post(url, json=payload, timeout=5)
-        if r.status_code == 200:
-            return r.json()["candidates"][0]["content"]["parts"][0]["text"]
-    except:
-        pass
-
-    return " ".join(keywords)
+sequence_buffer = []
 
 
-# ===============================
-# DATA COLLECTION PAGE
-# ===============================
+# -------------------------
+# Video Processor
+# -------------------------
 
-def data_collection_page():
+class GestureProcessor(VideoTransformerBase):
 
-    st.header("📷 Data Collection")
+    def __init__(self):
+        self.sequence = []
 
-    gesture_name = st.text_input("Enter Gesture Name")
+    def transform(self, frame):
 
-    st.info(f"Target Sequence Length: {Config.SEQUENCE_LENGTH} frames")
+        img = frame.to_ndarray(format="bgr24")
 
-    extractor = FeatureExtractor()
-
-    img_file = st.camera_input("Capture gesture frame")
-
-    if img_file is not None:
-
-        bytes_data = img_file.getvalue()
-
-        np_img = np.frombuffer(bytes_data, np.uint8)
-
-        frame = cv2.imdecode(np_img, cv2.IMREAD_COLOR)
-
-        image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        image = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
         with mp_holistic.Holistic(
             min_detection_confidence=0.5,
@@ -87,152 +63,53 @@ def data_collection_page():
 
             results = holistic.process(image)
 
-            draw_styled_landmarks(image, results)
-
-            st.image(image)
-
-            if st.button("Save Frame") and gesture_name:
-
-                features = extractor.extract_enhanced_features(results)
-
-                g_path = os.path.join(Config.DATA_PATH, gesture_name)
-
-                ensure_dir(g_path)
-
-                file_id = len(os.listdir(g_path))
-
-                np.save(os.path.join(g_path, f"{file_id}.npy"), features)
-
-                st.success("Sample saved!")
-
-
-# ===============================
-# TRAINING PAGE
-# ===============================
-
-def training_page():
-
-    st.header("🧠 Model Training")
-
-    if st.button("Start Training"):
-
-        status = st.empty()
-
-        status.info("Training started...")
-
-        try:
-
-            import train_model
-
-            train_model.main()
-
-            status.success("Training Complete!")
-
-            st.balloons()
-
-        except Exception as e:
-
-            status.error(str(e))
-
-
-# ===============================
-# RECOGNITION PAGE
-# ===============================
-
-def recognition_page():
-
-    st.header("🗣 Gesture Recognition")
-
-    try:
-
-        model = load_model(Config.MODEL_PATH)
-
-        with open(Config.LABELS_PATH, "rb") as f:
-            label_map = pickle.load(f)
-
-        with open(Config.SCALER_PATH, "rb") as f:
-            scaler = pickle.load(f)
-
-    except Exception as e:
-
-        st.error(f"Model loading error: {e}")
-
-        return
-
-    extractor = FeatureExtractor()
-
-    img_file = st.camera_input("Capture gesture")
-
-    if img_file is not None:
-
-        bytes_data = img_file.getvalue()
-
-        np_img = np.frombuffer(bytes_data, np.uint8)
-
-        frame = cv2.imdecode(np_img, cv2.IMREAD_COLOR)
-
-        image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-
-        with mp_holistic.Holistic(
-            min_detection_confidence=0.5,
-            min_tracking_confidence=0.5
-        ) as holistic:
-
-            results = holistic.process(image)
-
-            draw_styled_landmarks(image, results)
-
-            st.image(image)
+            draw_styled_landmarks(img, results)
 
             features = extractor.extract_enhanced_features(results)
 
-            data = np.array(features).reshape(1, -1)
+            self.sequence.append(features)
 
-            data_scaled = scaler.transform(data)
+            if len(self.sequence) > Config.SEQUENCE_LENGTH:
+                self.sequence.pop(0)
 
-            data_scaled = data_scaled.reshape(
-                1,
-                Config.SEQUENCE_LENGTH,
-                Config.feature_dim
-            )
+            if len(self.sequence) == Config.SEQUENCE_LENGTH:
 
-            probs = model.predict(data_scaled)[0]
+                data = np.array(self.sequence).reshape(-1, 774)
 
-            best_idx = np.argmax(probs)
+                data_scaled = scaler.transform(data)
 
-            confidence = probs[best_idx]
+                data_scaled = data_scaled.reshape(
+                    1,
+                    Config.SEQUENCE_LENGTH,
+                    774
+                )
 
-            inv_map = {v: k for k, v in label_map.items()}
+                probs = model.predict(data_scaled)[0]
 
-            pred_label = inv_map[best_idx]
+                best_idx = np.argmax(probs)
 
-            st.success(f"Prediction: {pred_label}")
+                confidence = probs[best_idx]
 
-            st.write(f"Confidence: {confidence:.2f}")
+                label = inv_map[best_idx]
 
+                cv2.putText(
+                    img,
+                    f"{label} ({confidence:.2f})",
+                    (20, 40),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    1,
+                    (0,255,0),
+                    2
+                )
 
-# ===============================
-# MAIN APP
-# ===============================
-
-def main():
-
-    st.sidebar.title("Hand Gesture AI")
-
-    mode = st.sidebar.radio(
-        "Go to:",
-        ["Data Collection", "Train Model", "Recognition"]
-    )
-
-    if mode == "Data Collection":
-        data_collection_page()
-
-    elif mode == "Train Model":
-        training_page()
-
-    elif mode == "Recognition":
-        recognition_page()
+        return img
 
 
-if __name__ == "__main__":
-    main()
+# -------------------------
+# Webcam Stream
+# -------------------------
+
+webrtc_streamer(
+    key="gesture",
+    video_transformer_factory=GestureProcessor
+)
