@@ -1,9 +1,8 @@
-streamlit
-opencv-python-headless
-numpy<2.0.0
-mediapipe
-tensorflow-cpu
-scikit-learn
+streamlit==1.32.0
+mediapipe==0.10.14
+opencv-python-headless==4.9.0.80
+numpy<2
+tensorflow-cpu==2.15.0
+scikit-learn==1.3.2
 requests
-pyttsx3
 python-dotenv

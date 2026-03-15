@@ -69,6 +69,13 @@ gemini_in_q = st.session_state.gemini_in_q
 gemini_out_q = st.session_state.gemini_out_q
 
 def tts_loop():
+    # Fix for Windows: Background threads must initialize COM before using pyttsx3
+    try:
+        import pythoncom
+        pythoncom.CoInitialize()
+    except ImportError:
+        pass # If on Linux/Streamlit Cloud, this simply skips and continues normally
+
     engine = pyttsx3.init()
     while True:
         text = tts_queue.get()
