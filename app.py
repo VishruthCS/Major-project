@@ -26,7 +26,7 @@ if not os.path.exists(Config.MODEL_PATH):
 @st.cache_resource
 def load_ai():
 
-    model = load_model(Config.MODEL_PATH, compile=False, safe_mode=false)        
+    model = load_model(Config.MODEL_PATH, compile=False, safe_mode=False)        
     with open(Config.LABELS_PATH, "rb") as f:
         label_map = pickle.load(f)
 
