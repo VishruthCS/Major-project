@@ -7,7 +7,8 @@ from streamlit_webrtc import webrtc_streamer, VideoTransformerBase
 
 from config import Config
 from utils import FeatureExtractor, draw_styled_landmarks
-from tensorflow.keras.models import load_model
+import tensorflow as tf
+load_model = tf.keras.models.load_model
 import os
 
 
@@ -25,8 +26,9 @@ if not os.path.exists(Config.MODEL_PATH):
     st.stop()
 @st.cache_resource
 def load_ai():
+    import tensorflow as tf
+    model = tf.keras.models.load_model(Config.MODEL_PATH, compile=False)
 
-    model = load_model(Config.MODEL_PATH, compile=False)        
     with open(Config.LABELS_PATH, "rb") as f:
         label_map = pickle.load(f)
 
