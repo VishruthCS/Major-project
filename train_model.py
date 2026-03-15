@@ -162,7 +162,7 @@ def main():
     callbacks = [
         EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True),
         ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=5, min_lr=1e-6, verbose=1),
-        ModelCheckpoint("models/5gesture_lstm_model.keras", save_best_only=True, monitor='val_loss')
+        ModelCheckpoint("models/gesture_lstm_model.keras", save_best_only=True, monitor='val_loss')
     ]
 
     # On-the-fly augmentation

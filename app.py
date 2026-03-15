@@ -8,6 +8,8 @@ from streamlit_webrtc import webrtc_streamer, VideoTransformerBase
 from config import Config
 from utils import FeatureExtractor, draw_styled_landmarks
 from tensorflow.keras.models import load_model
+import os
+
 
 mp_holistic = mp.solutions.holistic
 
@@ -18,7 +20,9 @@ st.title("🤟 Sign Language Recognition")
 # -------------------------
 # Load Model
 # -------------------------
-
+if not os.path.exists(Config.MODEL_PATH):
+    st.error("Model file not found in models folder")
+    st.stop()
 @st.cache_resource
 def load_ai():
 
