@@ -227,110 +227,65 @@ def training_page():
 # 3. RECOGNITION PAGE (OPTIMIZED)
 # ==========================================
 def recognition_page():
-    st.header("🗣️ Real-Time Recognition")
-    
-    col1, col2 = st.columns([3, 1])
-    
-    with col2:
-        st.subheader("Settings")
-        mirror_mode = st.checkbox("Mirror Camera", value=True)
-        st.divider()
-        pred_placeholder = st.empty()
-        prob_placeholder = st.empty()
-        st.divider()
-        keywords_placeholder = st.empty()
-        gemini_placeholder = st.empty()
+    st.header("🗣️ Gesture Recognition")
 
-        if st.button("Clear All"):
-            st.rerun()
+    try:
+        model = load_model(Config.MODEL_PATH)
 
-    with col1:
-        run_rec = st.checkbox("Start Recognition", key="run_rec")
-        frame_window = st.image([])
+        with open(Config.LABELS_PATH, "rb") as f:
+            label_map = pickle.load(f)
 
-    if run_rec:
-        try:
-            model = load_model(Config.MODEL_PATH)
-            with open(Config.LABELS_PATH, "rb") as f:
-                label_map = pickle.load(f)
-            with open("models/scaler_lstm.pkl", "rb") as f:
-                scaler = pickle.load(f)
-        except Exception as e:
-            st.error(f"Error loading model: {e}")
-            return
+        with open(Config.SCALER_PATH, "rb") as f:
+            scaler = pickle.load(f)
 
-        cap = CameraStream(0) # Threaded Camera for Zero Lag
-        extractor = FeatureExtractor()
-        sequence_buffer = []
-        sentence_words = []
-        last_pred_time = 0
-        CONF_THRESHOLD = 0.75 
-        
-        with mp_holistic.Holistic(min_detection_confidence=0.5, min_tracking_confidence=0.5) as holistic:
-            while run_rec:
-                ret, frame = cap.read()
-                if not ret: break
-                
-                if mirror_mode:
-                    frame = cv2.flip(frame, 1)
+    except Exception as e:
+        st.error(f"Model loading error: {e}")
+        return
 
-                image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                results = holistic.process(image)
-                draw_styled_landmarks(image, results)
-                
-                features = extractor.extract_enhanced_features(results)
-                sequence_buffer.append(features)
-                if len(sequence_buffer) > Config.SEQUENCE_LENGTH:
-                    sequence_buffer.pop(0)
-                
-                if len(sequence_buffer) == Config.SEQUENCE_LENGTH:
-                    motion = np.mean(np.abs(np.array(sequence_buffer)[-1] - np.array(sequence_buffer)[-5]))
-                    
-                    if motion > 0.015: 
-                        data = np.array(sequence_buffer).reshape(-1, 774)
-                        data_scaled = scaler.transform(data).reshape(1, Config.SEQUENCE_LENGTH, 774)
-                        
-                        probs = model.predict(data_scaled, verbose=0)[0]
-                        best_idx = np.argmax(probs)
-                        confidence = probs[best_idx]
-                        inv_map = {v: k for k, v in label_map.items()}
-                        pred_label = inv_map[best_idx]
-                        
-                        if confidence > CONF_THRESHOLD:
-                            pred_placeholder.markdown(f"### ✅ {pred_label}")
-                            prob_placeholder.progress(float(confidence))
-                        else:
-                            pred_placeholder.markdown(f"❓ Unsure")
-                            prob_placeholder.progress(float(confidence))
-                        
-                        # Trigger sentence parsing smoothly
-                        if confidence > CONF_THRESHOLD and (time.time() - last_pred_time > 1.5):
-                            if not sentence_words or sentence_words[-1] != pred_label:
-                                sentence_words.append(pred_label)
-                                last_pred_time = time.time()
-                                keywords_placeholder.info(" ".join(sentence_words))
-                                
-                                if len(sentence_words) >= 2:
-                                    gemini_placeholder.text("🤔 AI is thinking...")
-                                    # ✅ FIX: Pass a COPY of the list to prevent reference modification bugs
-                                    gemini_in_q.put(list(sentence_words)) 
-                                else:
-                                    tts_queue.put(pred_label) 
-                
-                # Check if Gemini replied without blocking the video feed
-                try:
-                    ai_sentence = gemini_out_q.get_nowait()
-                    gemini_placeholder.success(ai_sentence)
-                    tts_queue.put(ai_sentence)
-                except queue.Empty:
-                    pass
+    extractor = FeatureExtractor()
 
-                frame_window.image(image, channels="RGB")
+    img_file = st.camera_input("Capture gesture frame")
 
-        # Failsafe release if loop breaks
-        if cap.running:
-            cap.release()
+    if img_file is not None:
 
+        bytes_data = img_file.getvalue()
+        np_img = np.frombuffer(bytes_data, np.uint8)
+        frame = cv2.imdecode(np_img, cv2.IMREAD_COLOR)
+
+        image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+
+        with mp_holistic.Holistic(
+            min_detection_confidence=0.5,
+            min_tracking_confidence=0.5
+        ) as holistic:
+
+            results = holistic.process(image)
+
+            draw_styled_landmarks(image, results)
+
+            features = extractor.extract_enhanced_features(results)
+
+            data = np.array(features).reshape(1, -1)
+            data_scaled = scaler.transform(data)
+
+            data_scaled = data_scaled.reshape(
+                1,
+                Config.SEQUENCE_LENGTH,
+                Config.feature_dim
+            )
+
+            probs = model.predict(data_scaled)[0]
+
+            best_idx = np.argmax(probs)
+            confidence = probs[best_idx]
+
+            inv_map = {v: k for k, v in label_map.items()}
+            pred_label = inv_map[best_idx]
+
+            st.image(image)
+
+            st.success(f"Prediction: {pred_label}")
+            st.write(f"Confidence: {confidence:.2f}")
 def main():
     st.sidebar.title("Hand Gesture AI")
     mode = st.sidebar.radio("Go to:", ["Data Collection", "Train Model", "Recognition"])
